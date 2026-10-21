@@ -905,6 +905,12 @@ document.getElementById('customSymptom').addEventListener('keydown', e => {
 </html>"""
 
 class NetdiagHandler(SimpleHTTPRequestHandler):
+    last_request = time.time()
+
+    def handle_one_request(self):
+        NetdiagHandler.last_request = time.time()
+        super().handle_one_request()
+
     def do_GET(self):
         p = urlparse(self.path).path
         if p == '/':
@@ -966,8 +972,19 @@ def main():
     url = f'http://127.0.0.1:{port}'
     print(f'netdiag web → {url}')
     print('Press Ctrl+C to stop')
-    if not os.environ.get('NETDIAG_NO_BROWSER'):  # the app launcher opens the page itself
+    if not os.environ.get('NETDIAG_NO_BROWSER'):
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    # The Network Doctor app runs this as its own process with no Dock icon, so there is
+    # nothing to quit; NETDIAG_IDLE_EXIT=<minutes> shuts it down after that long without requests.
+    idle_min = float(os.environ.get('NETDIAG_IDLE_EXIT', 0) or 0)
+    if idle_min:
+        def reaper():
+            while True:
+                time.sleep(30)
+                if time.time() - NetdiagHandler.last_request > idle_min * 60:
+                    srv.shutdown()
+                    return
+        threading.Thread(target=reaper, daemon=True).start()
     try: srv.serve_forever()
     except KeyboardInterrupt:
         print('\nStopped.')

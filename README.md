@@ -14,7 +14,7 @@ Network Doctor opens in your browser. Next time, open **Network Doctor** from Sp
 No admin password needed. The first time, macOS may ask to install its Command Line Tools:
 click **Install**, wait, then paste the line again. Running it again also updates to the latest version.
 
-Uninstall: `rm -rf ~/.netdiag "$HOME/Applications/Network Doctor.app"`
+Uninstall: `launchctl bootout gui/$(id -u)/com.jgonzalez007.network-doctor; rm -rf ~/.netdiag "$HOME/Applications/Network Doctor.app"`
 
 **Command line only** (for scripting):
 
