@@ -7,13 +7,24 @@ A zero-dependency macOS (and mostly Linux) CLI tool for diagnosing WiFi/Ethernet
 Deploy to any Mac (or Linux) in 30 seconds:
 
 ```bash
-# Method 1: curl to execute
-curl -sSL https://raw.githubusercontent.com/openclaw/netdiag/main/netdiag | bash -s check "symptom"
+# Method 1: Download + run directly (recommended)
+# Downloads the latest release tarball and runs from /tmp (no install needed)
+curl -sSL https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz | tar xz -C /tmp
+/tmp/netdiag doctor                    # verify tools
+/tmp/netdiag check "WiFi drops after sleep"  # diagnose
 
-# Method 2: copy + install
-cp netdiag ~/.local/bin/ && chmod +x ~/.local/bin/netdiag
-~/.local/bin/netdiag check "WiFi drops"
+# Method 2: Install to PATH (~/.local/bin)
+curl -sSL https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz | tar xz -C ~/.local
+~/.local/install.sh                    # sets PATH in ~/.zshrc
+netdiag doctor                         # verify
+netdiag check "WiFi drops"             # diagnose
+
+# Method 3: Direct download (open browser first for auth)
+curl -L https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz | tar xz -C /tmp
 ```
+
+> **Note:** The repo is public so anonymous downloads work. If you had a 404 error,
+> make sure you're using the github.com URL (not raw.githubusercontent.com) and the tag name (`v1.0.0`).
 
 ## Features
 
@@ -76,6 +87,99 @@ You can start/stop it with:
 launchctl start com.jose.netdiag
 launchctl unload ~/Library/LaunchAgents/com.jose.netdiag.plist
 ```
+
+## What Happens When an Issue Is Detected
+
+### 1. Detection
+
+`netdiag watch` polls a **7-bit state signature** every N seconds:
+
+```
+wifi:1 | eth:0 | dns:1 | gw:1 | http:1 | gw_ip:192.168.12.1
+```
+
+Any bit flipping means the network state changed.
+
+### 2. Immediate Actions
+
+| Action | What Happens |
+|--------|-------------|
+| **Log event** | `~/.local/var/log/netdiag.events` — JSON line: time, previous state, new state |
+| **Append to log** | `~/.local/var/log/netdiag.log` — `[timestamp] CHANGE: old → new` |
+| **Notification** | macOS Notification Center via `osascript` |
+| **Voice alert** | `say "Network state change detected"` (when enabled) |
+| **State update** | Previous signature is replaced so the next change is detected correctly |
+
+### 3. Diagnosis
+
+```bash
+netdiag check "symptom"
+```
+
+Produces a report with root cause, confidence level, an evidence trail, and a
+specific recommended fix.
+
+### 4. Workboard Integration
+
+On OpenClaw hosts (where `WB_HOOK` is set), netdiag emits a `[WORKBOARD-CMD]`
+line that the Control UI turns into a card on the `network` board:
+
+```
+[WORKBOARD-CMD] {"action": "create_card", "board": "network", "status": "todo", "title": "symptom", "notes": "Root cause...\nFix...\nConfidence: ..."}
+```
+
+### 5. Resolution
+
+Netdiag **diagnoses, notifies, and recommends** — it never auto-applies changes.
+A human (or another agent) applies the fix, and the monitor confirms recovery
+when the state signature returns to normal.
+
+### Data files
+
+```
+~/.local/var/log/
+├── netdiag.log       # every tick + every state change
+└── netdiag.events    # JSON state changes (script-friendly)
+```
+
+## Troubleshooting
+
+### `bash: 404: command not found`
+
+The download URL returned GitHub's 404 HTML page and bash tried to execute it.
+Causes and fixes:
+
+| Cause | Fix |
+|-------|-----|
+| Repo was private | Repo is public now — retry the download |
+| Wrong URL host | Use `github.com/.../releases/download/...`, not `raw.githubusercontent.com` |
+| Wrong tag | Tag must exist: `v1.0.0` (with the `v` prefix) |
+| No release asset | Confirm with `gh release view v1.0.0 --repo jgonzalez007/netdiag` |
+
+Always test the URL first:
+
+```bash
+curl -sS -o /dev/null -w "HTTP %{http_code}\n" -L \
+  https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz
+# Expect: HTTP 200
+```
+
+Safer one-liner that fails loudly instead of piping a 404 into bash:
+
+```bash
+curl -fsSL https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz -o /tmp/netdiag.tar.gz || echo "download failed"
+tar xzf /tmp/netdiag.tar.gz -C /tmp && /tmp/netdiag doctor
+```
+
+### `netdiag: command not found` after install
+
+The PATH change only applies to new shells. Run `source ~/.zshrc`, or call the
+full path: `~/.local/bin/netdiag doctor`.
+
+### Missing optional tools
+
+`dig`, `traceroute`, `arp`, and `curl` are optional. `netdiag doctor` reports
+what's present. DNS falls back to `host`, then `getent`.
 
 ## Diagnostic Depth
 
