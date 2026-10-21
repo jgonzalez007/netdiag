@@ -4,27 +4,24 @@ A zero-dependency macOS (and mostly Linux) CLI tool for diagnosing WiFi/Ethernet
 
 ## Quick Start
 
-Deploy to any Mac (or Linux) in 30 seconds:
+**Install on any Mac:** open **Terminal** (Spotlight → "Terminal"), paste this line, press Return:
 
 ```bash
-# Method 1: Download + run directly (recommended)
-# Downloads the latest release tarball and runs from /tmp (no install needed)
-curl -sSL https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz | tar xz -C /tmp
-/tmp/netdiag doctor                    # verify tools
-/tmp/netdiag check "WiFi drops after sleep"  # diagnose
-
-# Method 2: Install to PATH (~/.local/bin)
-curl -sSL https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz | tar xz -C ~/.local
-~/.local/install.sh                    # sets PATH in ~/.zshrc
-netdiag doctor                         # verify
-netdiag check "WiFi drops"             # diagnose
-
-# Method 3: Direct download (open browser first for auth)
-curl -L https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz | tar xz -C /tmp
+curl -fsSL https://raw.githubusercontent.com/jgonzalez007/netdiag/main/get.sh | bash
 ```
 
-> **Note:** The repo is public so anonymous downloads work. If you had a 404 error,
-> make sure you're using the github.com URL (not raw.githubusercontent.com) and the tag name (`v1.0.0`).
+Network Doctor opens in your browser. Next time, open **Network Doctor** from Spotlight or Launchpad.
+No admin password needed. The first time, macOS may ask to install its Command Line Tools:
+click **Install**, wait, then paste the line again. Running it again also updates to the latest version.
+
+Uninstall: `rm -rf ~/.netdiag "$HOME/Applications/Network Doctor.app"`
+
+**Command line only** (for scripting):
+
+```bash
+git clone https://github.com/jgonzalez007/netdiag.git && cd netdiag && ./install.sh
+netdiag check "WiFi drops after sleep"
+```
 
 ## Features
 
@@ -165,32 +162,20 @@ when the state signature returns to normal.
 
 ## Troubleshooting
 
-### `bash: 404: command not found`
+### The installer stops with "needs Apple's Command Line Tools"
 
-The download URL returned GitHub's 404 HTML page and bash tried to execute it.
-Causes and fixes:
+Click **Install** in the window macOS opens, wait for it to finish (a few minutes),
+then paste the install line again.
 
-| Cause | Fix |
-|-------|-----|
-| Repo was private | Repo is public now — retry the download |
-| Wrong URL host | Use `github.com/.../releases/download/...`, not `raw.githubusercontent.com` |
-| Wrong tag | Tag must exist: `v1.0.0` (with the `v` prefix) |
-| No release asset | Confirm with `gh release view v1.0.0 --repo jgonzalez007/netdiag` |
+### Network Doctor doesn't open
 
-Always test the URL first:
+Check the server log: `cat ~/.netdiag/web.log`. Port 8765 must be free
+(`lsof -nP -iTCP:8765`). Starting it by hand shows errors directly:
+`python3 ~/.netdiag/app/netdiag-web.py`.
 
-```bash
-curl -sS -o /dev/null -w "HTTP %{http_code}\n" -L \
-  https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz
-# Expect: HTTP 200
-```
+### The username in URLs
 
-Safer one-liner that fails loudly instead of piping a 404 into bash:
-
-```bash
-curl -fsSL https://github.com/josegonzalez007/netdiag/releases/download/v1.0.0/netdiag-1.0.0.tar.gz -o /tmp/netdiag.tar.gz || echo "download failed"
-tar xzf /tmp/netdiag.tar.gz -C /tmp && /tmp/netdiag doctor
-```
+The GitHub account is `jgonzalez007`. Older copies of this README used `josegonzalez007`, which 404s.
 
 ### `netdiag: command not found` after install
 

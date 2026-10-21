@@ -6,6 +6,7 @@ Opens: http://localhost:8765
 """
 
 import json
+import os
 import re
 import subprocess
 import threading
@@ -965,7 +966,8 @@ def main():
     url = f'http://127.0.0.1:{port}'
     print(f'netdiag web → {url}')
     print('Press Ctrl+C to stop')
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    if not os.environ.get('NETDIAG_NO_BROWSER'):  # the app launcher opens the page itself
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try: srv.serve_forever()
     except KeyboardInterrupt:
         print('\nStopped.')
