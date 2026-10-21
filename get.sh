@@ -11,7 +11,7 @@
 #   • Network Doctor.app (launchable app)
 #
 # The background monitor runs automatically once installed (no login item).
-# Logs: ~/Library/Logs/jgonzalez007/network-doctor.log
+# Logs: ~/Desktop/network-doctor.log
 # =============================================================================
 
 set -euo pipefail
@@ -56,7 +56,7 @@ alert_enabled=true
 log_level=INFO
 SETTINGS
 
-mkdir -p "$HOME/Library/Logs/jgonzalez007"
+mkdir -p "$HOME/Desktop"
 
 # Create launchd job for daemon mode
 cat > "$HOME/Library/LaunchAgents/$LABEL.plist" <<'PLIST'
@@ -81,8 +81,8 @@ cat > "$HOME/Library/LaunchAgents/$LABEL.plist" <<'PLIST'
   <key>RunAtLoad</key><true/>
   <key>StartInterval</key><integer>60</integer>
   
-  <key>StandardOutPath</key><string>/Users/$(whoami)/Library/Logs/jgonzalez007/network-doctor.log</string>
-  <key>StandardErrorPath</key><string>/Users/$(whoami)/Library/Logs/jgonzalez007/network-doctor.log</string>
+  <key>StandardOutPath</key><string>/Users/$(whoami)/Desktop/network-doctor.log</string>
+  <key>StandardErrorPath</key><string>/Users/$(whoami)/Desktop/network-doctor.log</string>
   
   <key>KeepAlive</key><false/>
   <key>LimitLoadToSZ</key><true/>
@@ -129,4 +129,4 @@ echo ""
 echo "To stop the background monitor (optional):"
 echo "  sudo launchctl bootout gui/\$(id -u)/com.jgonzalez007.network-doctor"
 echo ""
-echo "Logs: ~/Library/Logs/jgonzalez007/network-doctor.log"
+echo "Logs: ~/Desktop/network-doctor.log"
