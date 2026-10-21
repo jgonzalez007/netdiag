@@ -57,6 +57,27 @@ netdiag watch --every 30
 # Logs state changes, can notify via macOS Notification Center
 ```
 
+### Web Dashboard (Network Doctor)
+
+```bash
+netdiag-web        # or: python3 netdiag-web.py   → http://127.0.0.1:8765
+```
+
+Pick a symptom (including **VPN Issues**) and it runs the quick test, then:
+
+- **Deep checks** (always, ~11s, no root): path MTU, IPv6 re-configuration rate,
+  last-hour Wi-Fi quality (RSSI, beacon loss, retries, channel load), ISP gateway
+  (T-Mobile 5G Home Internet status API: model, signal, uptime), public-IP
+  stability, power state, VPN tunnels and Cisco AnyConnect reconnects.
+- **Traffic capture** (only when the quick test passes, 15s): retransmits,
+  out-of-order data, slow connections and interface errors via `nettop`/`netstat`.
+  Started with `sudo`, it also saves a `.pcap` to `~/.netdiag/captures/`.
+
+Typical VPN finding on 5G/CGNAT ISPs: path MTU below 1500 and frequent IPv6
+re-configuration, both of which make AnyConnect reconnect.
+Run the dashboard **on the computer that has the problem**: Wi-Fi, power and VPN checks are local.
+macOS only; needs `python3` (Xcode Command Line Tools).
+
 ### Tool Verification
 
 ```bash

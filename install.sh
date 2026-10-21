@@ -15,6 +15,12 @@ mkdir -p "$TARGET"
 cp "${SCRIPT_DIR}/netdiag" "${TARGET}/netdiag"
 chmod +x "${TARGET}/netdiag"
 
+# Web dashboard (needs python3; it runs the netdiag installed next to it)
+if [ -f "${SCRIPT_DIR}/netdiag-web.py" ]; then
+    cp "${SCRIPT_DIR}/netdiag-web.py" "${TARGET}/netdiag-web"
+    chmod +x "${TARGET}/netdiag-web"
+fi
+
 # Add to PATH if not already there
 if ! echo "$PATH" | tr ':' '\n' | grep -qF "$TARGET"; then
     SHELL_RC=""
@@ -30,3 +36,5 @@ fi
 echo "Installed netdiag v${VERSION} to $TARGET/netdiag"
 echo "Run: netdiag check 'symptom'"
 echo "Run: netdiag doctor"
+[ -f "${TARGET}/netdiag-web" ] && echo "Run: netdiag-web   (opens the Network Doctor dashboard)"
+true
