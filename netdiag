@@ -1,0 +1,475 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  netdiag  —  Portable Network Troubleshooting Agent v1.0.0
+#  Deploy to any macOS (12+) machine: `curl ... | bash` or copy + chmod.
+#  Zero dependencies beyond macOS BSD tools (ping, dig, netstat, networksetup,
+#  scutil, traceroute, osascript). Works with bash 3.2.
+#
+#  USAGE:
+#    netdiag check [symptom]       Run a single diagnosis (default). Human report.
+#    netdiag watch [--every N]     Monitor continuously; logs drops, can notify.
+#    netdiag doctor                Verify required tools are available.
+#    netdiag report --json         Machine-readable JSON report.
+#    netdiag install               Install into PATH + (optional) launchd monitor.
+#    netdiag version               Print version and exit.
+#
+#  Exit codes:  0 = network healthy  1 = problem detected  2 = usage error
+# =============================================================================
+set -u
+VERSION="1.0.0"
+
+# ---- configuration ----------------------------------------------------------
+PING_TARGETS=("8.8.8.8" "1.1.1.1")
+HTTP_TARGET="google.com"
+DNS_TARGETS=("google.com" "1.1.1.1")
+DEFAULT_WATCH_INTERVAL=30
+LOG_DIR="${HOME}/.local/var/log"
+LOG_FILE="${LOG_DIR}/netdiag.log"
+STATE_FILE="${LOG_DIR}/netdiag.state"
+NOTIFY_ON_DROP="${NETDIAG_NOTIFY:-1}"
+OS="$(uname -s 2>/dev/null || echo Darwin)"
+
+# ---- helpers ----------------------------------------------------------------
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+err() { printf 'netdiag: ERROR: %s\n' "$*" >&2; }
+
+note() { printf 'netdiag: %s\n' "$*"; }
+
+# macOS has no `timeout`; run ping with -c and -W only
+ping_ok() {
+    local host="$1"
+    ping -c 2 -W 2000 "$host" 2>/dev/null # -W ms (macOS/BSD) ; -c count
+}
+
+# Returns "loss_percent latency_avg" for a host, or "" on failure
+ping_stats() {
+    local host="$1"
+    local out
+    out="$(ping -c 4 -W 2000 "$host" 2>/dev/null)" || return 1
+    # macOS: "4 packets transmitted, 4 packets received, 0.0% packet loss"
+    # "round-trip min/avg/max/stddev = 9.608/12.578/14.477/1.720 ms"
+    local loss avg
+    loss="$(printf '%s\n' "$out" | awk -F', ' '/packet loss/ {gsub(/%/,"",$3); print $3; exit}')"
+    avg="$(printf '%s\n' "$out" | awk -F'=' '/round-trip/ {
+        # macOS format: min/avg/max/stddev ... Linux: rtt min/avg/max/mdev
+        split($2, a, /[ \/]/);
+        print a[2]; exit
+    }')"
+    [ -n "$loss" ] && [ -n "$avg" ] && printf '%s %s\n' "$loss" "$avg"
+}
+
+# ---- interface / service discovery ----------------------------------------
+
+# List network service names; lines with '*' are disabled
+network_services() {
+    local out
+    out="$(networksetup -listallnetworkservices 2>/dev/null)"
+    if [ -z "$out" ]; then return 1; fi
+    printf '%s\n' "$out" | awk 'NR>1 && NF'
+}
+
+service_enabled() {
+    local svc="$1"
+    local info
+    info="$(networksetup -getinfo "$svc" 2>/dev/null)"
+    # Disabled services print: "There is no ... in the current network configuration"
+    # Enabled services with IP: "IP address: 192.168. ..."
+    case "$info" in
+        *"IP address"*) return 0 ;;
+        *"no "*) return 1 ;;
+        "")  return 1 ;;
+        *)   # Has config? treat as enabled if there is any info
+            if [ -w /dev/null ] 2>/dev/null; then :; fi
+            case "$info" in *"DHCP"*) return 0 ;; *"Router"*) return 0 ;; *) return 1 ;; esac
+            ;;
+    esac
+}
+
+# hardware ports mapping  device -> "Wi-Fi" / "Ethernet" etc.
+hardware_port_for() {
+    local dev="$1"
+    # parse: "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: ..."
+    networksetup -listallhardwareports 2>/dev/null \
+      | awk -v want="$dev" '
+          /^Hardware Port:/ { port=$3 }  # "Hardware Port: Wi-Fi"
+          /^Device:/       { if ($2==want) { print port; exit } }
+      '
+}
+
+active_interfaces() {
+    # Print "dev:port:type" for each interface with an IPv4 address
+    local iface mac ip
+    while IFS= read -r line; do
+        case "$line" in
+            [a-zA-Z0-9]*:*) iface="${line%%:*}" ;;
+            *) continue ;;
+        esac
+        if printf '%s' "$line" | grep -qE '^[[:space:]]inet [0-9]'; then
+            ip="$(printf '%s' "$line" | awk '{print $2}')"
+            mac="$(networksetup -getmacaddress "$iface" 2>/dev/null | awk '{print $NF}')"
+            local port
+            port="$(hardware_port_for "$iface")"
+            printf '%s:%s:%s:%s\n' "$iface" "${ip:-NA}" "${mac:-NA}" "${port:-unknown}"
+        fi
+    done < <(ifconfig 2>/dev/null)
+}
+
+default_gateway() {
+    netstat -rn 2>/dev/null | awk '$1=="default" {print $2; exit}'
+}
+
+# ---- probes ----------------------------------------------------------------
+
+probe_wifi() {
+    local wifi_up=0 enabled  svc
+    enabled="$(network_services)"
+    while IFS= read -r svc; do
+        [ -z "$svc" ] && continue
+        case "$svc" in
+            *Wi-Fi*|*WiFi*)
+                if service_enabled "$svc"; then wifi_up=1; fi ;;
+        esac
+    done <<< "$enabled"
+    printf '%d' "$wifi_up"
+}
+
+probe_ethernet() {
+    local eth_up=0 svc
+    while IFS= read -r svc; do
+        [ -z "$svc" ] && continue
+        case "$svc" in
+            *Ethernet*|*"Thunderbolt Bridge"*)
+                if service_enabled "$svc"; then eth_up=1; fi ;;
+        esac
+    done < <(network_services)
+    printf '%d' "$eth_up"
+}
+
+probe_dns() {
+    local host out
+    for host in "${DNS_TARGETS[@]}"; do
+        if have dig; then
+            out="$(dig +short +time=5 "$host" A 2>/dev/null)"
+        elif have host; then
+            out="$(host "$host" 2>/dev/null)"
+        else
+            out="$(getent hosts "$host" 2>/dev/null)"
+        fi
+        if [ -n "$out" ]; then return 0; fi
+    done
+    return 1
+}
+
+probe_gateway_ping() {
+    local gw
+    gw="$(default_gateway)"
+    [ -n "$gw" ] && ping -c 3 -W 2000 "$gw" 2>/dev/null
+}
+
+probe_traceroute() {
+    local n
+    n="${NETDIAG_TRACE_HOPS:-15}"
+    traceroute -n -w 2 -q 1 -m "$n" "${PING_TARGETS[0]}" >/dev/null 2>&1
+}
+
+probe_http() {
+    if have curl; then
+        curl -sS --connect-timeout 6 "https://${HTTP_TARGET}/generate_204" >/dev/null 2>&1 \
+            || curl -sS --connect-timeout 5 -o /dev/null "https://${HTTP_TARGET}" 2>&1
+    elif have curl; then
+        true
+    else
+        ping -c 1 -W 2000 "$HTTP_TARGET" 2>/dev/null
+    fi
+}
+
+# ---- state signature --------------------------------------------------------
+
+signature() {
+    printf 'wifi:%d eth:%d dns:%d gw:%d http:%d gwip:%s' \
+        "$(probe_wifi)" "$(probe_ethernet)" \
+        "$(probe_dns && echo 1 || echo 0)" \
+        "$(probe_gateway_ping >/dev/null 2>&1 && echo 1 || echo 0)" \
+        "$(probe_http >/dev/null 2>&1 && echo 1 || echo 0)" \
+        "$(default_gateway)"
+}
+
+# ---- diagnosis --------------------------------------------------------------
+
+diagnose() {
+    local symptom="${1:-network issue}"
+    local wifi_up eth_up dns_ok gw_ok http_ok
+    local gw gw_ping gw_loss gw_lat gw_iface gw_mac
+    gw="$(default_gateway)"
+
+    wifi_up="$(probe_wifi)"
+    eth_up="$(probe_ethernet)"
+    dns_ok=0; probe_dns && dns_ok=1
+    gw_ok=0; gw_ping=""; gw_loss=""; gw_lat=""
+    if [ -n "$gw" ]; then
+        if [ "$gw_ok" = 0 ] && ping -c 3 -W 2000 "$gw" >/dev/null 2>&1; then gw_ok=1; fi
+        gw_ping="$(ping_stats "$gw" 2>/dev/null || true)"
+        if [ -n "$gw_ping" ]; then
+            gw_loss="$(printf '%s' "$gw_ping" | cut -d' ' -f1)"
+            gw_lat="$(printf '%s' "$gw_ping" | cut -d' ' -f2)"
+        fi
+    fi
+    http_ok=0; probe_http >/dev/null 2>&1 && http_ok=1
+
+    # gateway interface
+    gw_iface=""; gw_mac=""
+    if [ -n "$gw" ]; then
+        gw_iface="$(netstat -rn -f link 2>/dev/null | awk -v gw="$gw" '
+            $1=="default" {print $6; exit}
+        ')" 
+        # Fallback: arping the gateway
+        gw_mac="$(arp -n "$gw" 2>/dev/null | awk '/at/ {print $4; exit}')"
+    fi
+
+    # ping targets stats
+    local ext_loss ext_lat
+    ext_loss=""; ext_lat=""
+    if [ "$dns_ok" = 1 ] || [ "$gw_ok" = 1 ]; then
+        ext_ping="$(ping_stats "${PING_TARGETS[0]}" 2>/dev/null || true)"
+        if [ -n "$ext_ping" ]; then
+            ext_loss="$(printf '%s' "$ext_ping" | cut -d' ' -f1)"
+            ext_lat="$(printf '%s' "$ext_ping" | cut -d' ' -f2)"
+        fi
+    fi
+
+    # ---- determine root cause ----
+    local root_cause fix confidence="low"
+    root_cause=""; fix=""
+
+    if [ "$wifi_up" = 0 ] && [ "$eth_up" = 0 ]; then
+        root_cause="No active network interfaces (WiFi and Ethernet both down)."
+        fix="Toggle WiFi off/on or plug an Ethernet cable. Check networksetup -listallnetworkservices."
+        confidence="high"
+    elif [ "$dns_ok" = 0 ]; then
+        root_cause="DNS resolution failed."
+        fix="Flush DNS cache (sudo dscacheutil -flushcache), check router DNS, or set 8.8.8.8/1.1.1.1 manually."
+        confidence="high"
+    elif [ "$gw_ok" = 0 ]; then
+        root_cause="Cannot reach default gateway (${gw:-unknown}) — local link/L2 problem."
+        fix="Check Wi-Fi signal quality and router/AP reachability. Renew DHCP (networksetup -renew "Wi-Fi")."
+        confidence="high"
+    elif [ "$http_ok" = 0 ]; then
+        root_cause="Layer-3 path OK but HTTPS/HTTP fails — possible captive portal, firewall, or ISP shaping."
+        fix="Test from another device, check for captive portal, or try a VPN. Rule: ping 8.8.8.8 works but https://google.com doesn't."
+        confidence="medium"
+    elif [ -n "$gw_loss" ] && [ "${gw_loss%.*}" -gt 0 ] 2>/dev/null; then
+        root_cause="Packet loss toward gateway (${gw_loss} loss, avg ${gw_lat}ms) — Wi-Fi signal/roaming or local congestion."
+        fix="Move closer to the router, reduce interference (5GHz), or restart the Wi-Fi interface."
+        confidence="high"
+    else
+        root_cause="No layer-2/3 failure detected. Likely an application-layer, rate-limit, or intermittent issue."
+        fix="Run 'netdiag watch' to catch transient drops and correlate timestamps in the log."
+        confidence="low"
+    fi
+
+    # ---- report ----
+    cat <<EOF
+================================================================================
+ NETWORK TROUBLESHOOTING AGENT — netdiag ${VERSION}
+================================================================================
+ Symptom: ${symptom}
+ Generated: $(date '+%a %Y-%m-%d %H:%M:%S %Z')  Host: $(scutil --get ComputerName 2>/dev/null)
+
+ --- Network Interfaces ---
+ Wi-Fi enabled:       $([ "$wifi_up" = 1 ] && echo "YES" || echo "NO")
+ Ethernet enabled:    $([ "$eth_up" = 1 ] && echo "YES" || echo "NO")
+ Active interfaces:
+$(active_interfaces | sed 's/^/   /')
+ Default gateway:    ${gw:-<none>}
+ Gateway iface/MAC:   ${gw_iface:-?}/ ${gw_mac:-<unresolved>}
+
+ --- Connectivity Probes ---
+ DNS resolution:      $([ "$dns_ok" = 1 ] && echo "OK" || echo "FAILED")
+ Gateway ping:        $([ "$gw_ok" = 1 ] && echo "OK" || echo "FAILED") ${gw:-}
+ Gateway loss/latency: ${gw_loss:-NA} / ${gw_lat:-NA} ms
+ HTTP (https://${HTTP_TARGET}): $([ "$http_ok" = 1 ] && echo "OK" || echo "FAILED")
+ External 8.8.8.8 loss/latency: ${ext_loss:-NA} / ${ext_lat:-NA} ms
+
+ --- Root Cause ---
+ Confidence: ${confidence}
+ Cause:     ${root_cause}
+
+ Evidence:
+   - WiFi service up:       ${wifi_up}
+   - Ethernet service up:   ${eth_up}
+   - DNS working:           ${dns_ok}
+   - Gateway reachable:     ${gw_ok}
+   - Gateway packet loss %: ${gw_loss:-NA}
+   - HTTP reachable:        ${http_ok}
+   - External loss %:       ${ext_loss:-NA}
+
+ --- Recommended Fix ---
+ ${fix}
+================================================================================
+EOF
+
+    # Workboard integration hint (only on OpenClaw hosts that define WB_HOOK)
+    if [ -n "${WB_HOOK:-}" ]; then
+        note "[netdiag] Would create Workboard card: ${symptom}"
+    fi
+
+    # exit code: 0 healthy, 1 problem
+    if [ "$confidence" = "high" ] && { [ "$wifi_up" = 0 ] && [ "$eth_up" = 0 ] || [ "$dns_ok" = 0 ] || [ "$gw_ok" = 0 ]; }; then
+        return 1
+    fi
+    if [ "$http_ok" = 0 ]; then return 1; fi
+    if [ -n "$gw_loss" ] && [ "${gw_loss%.*}" -gt 0 ] 2>/dev/null; then return 1; fi
+    return 0
+}
+
+# ---- json report ------------------------------------------------------------
+
+json_report() {
+    local wifi_up eth_up dns_ok gw_ok http_ok gw
+    gw="$(default_gateway)"
+    wifi_up="$(probe_wifi)"
+    eth_up="$(probe_ethernet)"
+    dns_ok=0; probe_dns && dns_ok=1
+    gw_ok=0
+    [ -n "$gw" ] && ping -c 3 -W 2000 "$gw" >/dev/null 2>&1 && gw_ok=1
+    http_ok=0; probe_http >/dev/null 2>&1 && http_ok=1
+
+    local state="healthy"
+    { [ "$wifi_up" = 0 ] && [ "$eth_up" = 0 ]; } && state="no_interface"
+    [ "$dns_ok" = 0 ] && state="dns_failure"
+    [ "$gw_ok" = 0 ] && [ "$state" = "healthy" ] && state="gateway_unreachable"
+    [ "$http_ok" = 0 ] && [ "$state" = "healthy" ] && state="http_failure"
+
+    printf '{"schema":"netdiag/1.0","version":"%s","host":"%s","time":"%s",' \
+        "$VERSION" "$(scutil --get ComputerName 2>/dev/null || echo unknown)" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '"symptom":"%s","state":"%s",' "${1:-network issue}" "$state"
+    printf '"interfaces":{"wifi":%s,"ethernet":%s,"gateway":"%s","gateway_reachable":%s,' \
+        "$wifi_up" "$eth_up" "${gw:-null}" "$gw_ok"
+    printf '"dns":%s,"http":%s}' "$dns_ok" "$http_ok"
+    printf '}\n'
+}
+
+# ---- watch / monitoring -----------------------------------------------------
+
+notify() {
+    local msg="$1"
+    [ "$NOTIFY_ON_DROP" = 0 ] && return 0
+    if have osascript; then
+        osascript -e "display notification \"${msg}\" with title \"netdiag\"" 2>/dev/null || true
+    fi
+    if have say; then
+        say "${msg}" 2>/dev/null || true
+    fi
+}
+
+cmd_watch() {
+    local every="${DEFAULT_WATCH_INTERVAL}" i=0 prev_sig=""
+    if [ "${NETDIAG_WATCH_INTERVAL:-}" != "" ]; then every="$NETDIAG_WATCH_INTERVAL"; fi
+
+    mkdir -p "$LOG_DIR" 2>/dev/null || true
+    note "Watching network every ${every}s. Log: ${LOG_FILE}"
+    note "Press Ctrl-C to stop."
+
+    prev_sig="$(signature 2>/dev/null || echo '')"
+    printf '%s started at %s\n' "$$" "$(date '+%Y-%m-%dT%H:%M:%S')" >> "$LOG_FILE" 2>/dev/null || true
+
+    while :; do
+        sleep "$every"
+        i=$((i+1))
+        local sig
+        sig="$(signature 2>/dev/null || echo 'error')"
+        local ts
+        ts="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+
+        if [ "$sig" != "$prev_sig" ]; then
+            local msg="Network state change detected at ${ts}"
+            printf '[%s] CHANGE: %s -> %s\n' "$ts" "$prev_sig" "$sig" | tee -a "$LOG_FILE"
+            notify "$msg"
+            # record event
+            printf '{"time":"%s","prev":"%s","now":"%s"}\n' "$ts" "$prev_sig" "$sig" >> "${LOG_DIR}/netdiag.events" 2>/dev/null || true
+            prev_sig="$sig"
+        else
+            printf '[%s] tick #%d: %s\n' "$ts" "$i" "$sig" >> "$LOG_FILE" 2>/dev/null || true
+        fi
+    done
+}
+
+# ---- doctor -------------------------------------------------------------
+
+cmd_doctor() {
+    local missing=0
+    printf 'netdiag doctor — required tools\n'
+    for t in ping networksetup ifconfig netstat scutil date; do
+        if have "$t"; then
+            printf '  %-16s OK   %s\n' "$t" "$(command -v "$t")"
+        else
+            printf '  %-16s MISSING\n' "$t"
+            missing=1
+        fi
+    done
+    for t in dig traceroute arp curl; do
+        printf '  %-16s ' "$t"
+        if have "$t"; then
+            printf 'OK (optional)  %s\n' "$(command -v "$t")"
+        else
+            printf 'MISSING (recommended)\n'
+        fi
+    done
+    printf 'macOS: %s  bash: %s\n' "$(sw_vers -productVersion 2>/dev/null || echo unknown)" "$BASH_VERSION"
+    return "$missing"
+}
+
+# ---- install --------------------------------------------------------------
+
+cmd_install() {
+    local dest="${1:-${HOME}/.local/bin}"
+    local script
+    script="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    [ -L "$0" ] && script="$(readlink "$0")"
+    mkdir -p "$dest" 2>/dev/null || { err "cannot create $dest"; return 1; }
+    cp "$script" "${dest}/netdiag" 2>/dev/null && chmod +x "${dest}/netdiag" 2>/dev/null
+    note "Installed: ${dest}/netdiag"
+    note "Add to PATH if needed: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+}
+
+# ---- main dispatch ---------------------------------------------------------
+
+case "${1:-check}" in
+    check)
+        diagnose "${2:-network issue}"
+        ;;
+    watch)
+        if [ "${2:-}" = "--every" ]; then every="${3:-30}"; export NETDIAG_WATCH_INTERVAL="$every"; shift 2 || true; fi
+        cmd_watch
+        ;;
+    report)
+        if [ "${2:-}" = "--json" ]; then json_report "${3:-network issue}"; else diagnose "${2:-network issue}"; fi
+        ;;
+    doctor)
+        cmd_doctor
+        ;;
+    install)
+        cmd_install "${2:-${HOME}/.local/bin}"
+        ;;
+    version)
+        printf 'netdiag %s\n' "$VERSION"
+        ;;
+    help|--help|-h)
+        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' | sed '/^$/q'
+        cat <<USAGE
+
+Usage: netdiag <command> [args]
+  check [symptom]     Run a single diagnosis (default).
+  watch [--every N]   Monitor continuously (default 30s), log drops, notify.
+  report [--json]     Print machine-readable JSON.
+  doctor              Verify required tools are present.
+  install [dir]       Copy netdiag into [dir] (default ~/.local/bin).
+  version             Print version.
+USAGE
+        ;;
+    *)
+        err "unknown command: $1"; note "Run 'netdiag help'"; exit 2
+        ;;
+esac
