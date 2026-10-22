@@ -1,0 +1,100 @@
+Bonsai-2-27B with a web interface on a Mac (no OpenClaw)
+You need: an Apple Silicon Mac (M1 or newer), at least 16 GB of RAM, about 15 GB of free disk space, and an internet connection. All commands go in Terminal. Paste them one block at a time.
+
+Step 1: Download and install
+mkdir -p ~/src && cd ~/src
+git clone https://github.com/PrismML-Eng/Bonsai-demo.git
+cd Bonsai-demo
+BONSAI_FAMILY=bonsai2 BONSAI_MODEL=27B ./setup.sh
+If macOS asks to install the Xcode Command Line Tools, click Install, wait for it to finish, then run the setup.sh line again.
+If it asks a question, press Enter to accept the default.
+This takes 10–30 minutes. It downloads the model (7.2 GB), the Bonsai server and Open WebUI.
+Check that the model downloaded:
+
+ls -lh ~/src/Bonsai-demo/models/bonsai2-gguf/27B/
+You should see Ternary-Bonsai-2-27B-PQ2_0.gguf at about 6.7G.
+
+If the file is missing or smaller, download it by hand. If the download stops, run the same command again and it continues where it left off:
+
+mkdir -p ~/src/Bonsai-demo/models/bonsai2-gguf/27B && cd ~/src/Bonsai-demo/models/bonsai2-gguf/27B
+curl -fL -C - -O https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/main/Ternary-Bonsai-2-27B-PQ2_0.gguf
+cd ~/src/Bonsai-demo
+Step 2: Start the Bonsai server automatically at login
+cat > ~/Library/LaunchAgents/org.bonsai-server-27b.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.bonsai-server-27b</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>cd $HOME/src/Bonsai-demo &amp;&amp; PORT=8080 BONSAI_CTX=32768 BONSAI_GGUF=models/bonsai2-gguf/27B/Ternary-Bonsai-2-27B-PQ2_0.gguf ./scripts/start_llama_server.sh --chat-template-kwargs '{"reasoning_effort":"medium"}'</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/bonsai-server-27b.log</string>
+  <key>StandardErrorPath</key><string>/tmp/bonsai-server-27b-err.log</string>
+</dict>
+</plist>
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.bonsai-server-27b.plist
+Wait about a minute while the model loads, then check:
+
+curl -s localhost:8080/health
+It should print {"status":"ok"}. If it prints Loading model, wait a bit longer.
+
+Quick test: open http://localhost:8080 in Safari or Chrome. That's a simple chat page built into the Bonsai server. Ask it something to confirm it answers.
+
+Step 3: Start Open WebUI (the full chat app) automatically at login
+cat > ~/Library/LaunchAgents/org.bonsai-openwebui.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.bonsai-openwebui</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>cd $HOME/src/Bonsai-demo &amp;&amp; until curl -fs localhost:8080/health >/dev/null; do sleep 5; done; BONSAI_FAMILY=bonsai2 BONSAI_MODEL=27B ./scripts/start_openwebui.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/bonsai-openwebui.log</string>
+  <key>StandardErrorPath</key><string>/tmp/bonsai-openwebui-err.log</string>
+</dict>
+</plist>
+EOF
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.bonsai-openwebui.plist
+The first start takes 1–2 minutes. When it's ready, your browser opens http://localhost:9090 on its own, and it does the same at every login. Bookmark that address.
+
+It waits for the Bonsai server from Step 2 to be ready before starting, so it never launches a second copy of the model.
+
+Step 4: Using it
+Go to http://localhost:9090 and pick the Bonsai model at the top if it isn't already selected.
+Bonsai thinks before answering: you'll see a "thinking" section first. Expect about 14 tokens per second, so long answers take a minute or more.
+Open WebUI keeps your chat history and has built-in tools: weather, web fetch, running code and charts.
+Everyday commands
+What	Command
+Is Bonsai running?	curl -s localhost:8080/health
+Restart Bonsai	launchctl kickstart -k gui/$(id -u)/org.bonsai-server-27b
+Restart the web UI	launchctl kickstart -k gui/$(id -u)/org.bonsai-openwebui
+See errors	tail -50 /tmp/bonsai-server-27b-err.log /tmp/bonsai-openwebui-err.log
+Stop both until next login	launchctl bootout gui/$(id -u)/org.bonsai-openwebui; launchctl bootout gui/$(id -u)/org.bonsai-server-27b
+Start both again	launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.bonsai-server-27b.plist; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.bonsai-openwebui.plist
+Uninstall
+launchctl bootout gui/$(id -u)/org.bonsai-openwebui
+launchctl bootout gui/$(id -u)/org.bonsai-server-27b
+rm ~/Library/LaunchAgents/org.bonsai-openwebui.plist ~/Library/LaunchAgents/org.bonsai-server-27b.plist
+rm -rf ~/src/Bonsai-demo
+Important
+Security: in this setup, Open WebUI has no password and can run code on that Mac. It only accepts connections from that Mac itself, and it should stay that way. Don't set BONSAI_ALLOW_REMOTE=1 unless you understand that anyone on your network could then use it.
+Shorter or longer thinking: in Step 2, "reasoning_effort":"medium" keeps the thinking short. Remove --chat-template-kwargs '{"reasoning_effort":"medium"}' for the default, which is more thorough but much slower. Then restart Bonsai.
+Memory: with only 16 GB, close heavy apps while you use it. If it runs out of memory, change BONSAI_CTX=32768 to 16384 in Step 2's file and restart Bonsai.
+What I've checked and what I haven't: I haven't run this on another Mac. Steps 1–2 match what's running on this Mac. For Step 3, I read Bonsai-demo's own startup script to confirm it reuses the Bonsai server on port 8080 and runs Open WebUI on port 9090. Starting Open WebUI automatically at login is my own addition and hasn't been tested. If it doesn't come up, run start_openwebui.sh by hand in Terminal; that's the README's documented way, and it works the same.
+
+I can also save this as a file you can AirDrop to the other Mac.
